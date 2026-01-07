@@ -2,7 +2,12 @@
 use core::str::FromStr;
 use revm::primitives::hardfork::{SpecId, UnknownHardfork};
 
-/// ZKsync OS spec id.
+/// Identifies which EVM variant should be used during execution.
+/// Differences between variants may include supported opcodes,
+/// available precompiles, and gas-charging rules.
+///
+/// Note: The ZKsync OS Server is responsible for mapping its own
+/// `ExecutionVersion` to one of these spec IDs.
 #[repr(u8)]
 #[derive(
     Clone,
@@ -19,15 +24,16 @@ use revm::primitives::hardfork::{SpecId, UnknownHardfork};
 )]
 #[allow(non_camel_case_types)]
 pub enum ZkSpecId {
+    AtlasV1,
     #[default]
-    Atlas,
+    AtlasV2,
 }
 
 impl ZkSpecId {
     /// Converts the [`ZkSpecId`] into a [`SpecId`].
     pub const fn into_eth_spec(self) -> SpecId {
         match self {
-            Self::Atlas => SpecId::CANCUN,
+            Self::AtlasV1 | Self::AtlasV2 => SpecId::CANCUN,
         }
     }
 
@@ -48,7 +54,8 @@ impl FromStr for ZkSpecId {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            name::ATLAS => Ok(ZkSpecId::Atlas),
+            name::ATLASV1 => Ok(ZkSpecId::AtlasV1),
+            name::ATLASV2 => Ok(ZkSpecId::AtlasV2),
             _ => Err(UnknownHardfork),
         }
     }
@@ -57,7 +64,8 @@ impl FromStr for ZkSpecId {
 impl From<ZkSpecId> for &'static str {
     fn from(spec_id: ZkSpecId) -> Self {
         match spec_id {
-            ZkSpecId::Atlas => name::ATLAS,
+            ZkSpecId::AtlasV1 => name::ATLASV1,
+            ZkSpecId::AtlasV2 => name::ATLASV2,
         }
     }
 }
@@ -65,5 +73,6 @@ impl From<ZkSpecId> for &'static str {
 /// String identifiers for ZKsync OS hardforks
 pub mod name {
     /// Initial spec name.
-    pub const ATLAS: &str = "Atlas";
+    pub const ATLASV1: &str = "AtlasV1";
+    pub const ATLASV2: &str = "AtlasV2";
 }

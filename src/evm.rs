@@ -1,8 +1,8 @@
 //! Contains the `[ZKsyncEvm]` type and its implementation of the execution EVM traits.
-use crate::precompiles::ZKsyncPrecompiles;
+use crate::{ZkSpecId, precompiles::ZKsyncPrecompiles};
 use revm::{
     Database, Inspector,
-    context::{ContextError, ContextSetters, Evm, FrameStack},
+    context::{Cfg, ContextError, ContextSetters, Evm, FrameStack},
     context_interface::ContextTr,
     handler::{
         EthFrame, EvmTr, FrameInitOrResult, ItemOrResult, PrecompileProvider,
@@ -19,23 +19,23 @@ pub struct ZKsyncEvm<
     CTX,
     INSP,
     I = EthInstructions<EthInterpreter, CTX>,
-    P = ZKsyncPrecompiles,
+    P = ZKsyncPrecompiles<CTX>,
     F = EthFrame<EthInterpreter>,
 >(
     /// Inner EVM type.
     pub Evm<CTX, INSP, I, P, F>,
 );
 
-impl<CTX: ContextTr, INSP>
-    ZKsyncEvm<CTX, INSP, EthInstructions<EthInterpreter, CTX>, ZKsyncPrecompiles>
+impl<CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>, INSP>
+    ZKsyncEvm<CTX, INSP, EthInstructions<EthInterpreter, CTX>, ZKsyncPrecompiles<CTX>>
 {
     /// Create a new ZKsync OS EVM.
     pub fn new(ctx: CTX, inspector: INSP) -> Self {
         Self(Evm {
+            precompiles: ZKsyncPrecompiles::new_with_spec(ctx.cfg().spec()),
             ctx,
             inspector,
             instruction: EthInstructions::new_mainnet(),
-            precompiles: ZKsyncPrecompiles::default(),
             frame_stack: FrameStack::new(),
         })
     }
@@ -66,6 +66,30 @@ where
     INSP: Inspector<CTX, I::InterpreterTypes>,
 {
     type Inspector = INSP;
+
+    fn all_inspector(
+        &self,
+    ) -> (
+        &Self::Context,
+        &Self::Instructions,
+        &Self::Precompiles,
+        &FrameStack<Self::Frame>,
+        &Self::Inspector,
+    ) {
+        self.0.all_inspector()
+    }
+
+    fn all_mut_inspector(
+        &mut self,
+    ) -> (
+        &mut Self::Context,
+        &mut Self::Instructions,
+        &mut Self::Precompiles,
+        &mut FrameStack<Self::Frame>,
+        &mut Self::Inspector,
+    ) {
+        self.0.all_mut_inspector()
+    }
 
     fn inspector(&mut self) -> &mut Self::Inspector {
         &mut self.0.inspector
@@ -112,6 +136,28 @@ where
     type Instructions = I;
     type Precompiles = P;
     type Frame = EthFrame<EthInterpreter>;
+
+    fn all(
+        &self,
+    ) -> (
+        &Self::Context,
+        &Self::Instructions,
+        &Self::Precompiles,
+        &FrameStack<Self::Frame>,
+    ) {
+        self.0.all()
+    }
+
+    fn all_mut(
+        &mut self,
+    ) -> (
+        &mut Self::Context,
+        &mut Self::Instructions,
+        &mut Self::Precompiles,
+        &mut FrameStack<Self::Frame>,
+    ) {
+        self.0.all_mut()
+    }
 
     fn ctx(&mut self) -> &mut Self::Context {
         &mut self.0.ctx
