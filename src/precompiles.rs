@@ -11,8 +11,8 @@ use revm::{
     precompile::{Precompiles, bn254, hash, identity, modexp, secp256k1, secp256r1},
     primitives::{Address, OnceLock},
 };
+use std::boxed::Box;
 use std::string::String;
-use std::{boxed::Box, collections::HashMap};
 
 pub mod calldata_view;
 pub(crate) mod utils;
@@ -26,18 +26,56 @@ use v1::l2_base_token::L2_BASE_TOKEN_ADDRESS;
 type CustomPrecompile<CTX> =
     fn(ctx: &mut CTX, inputs: &CallInputs, is_delegate: bool) -> InterpreterResult;
 
+/// Returns `Some(InterpreterResult)` if a precompile is defined for the given [ZkSpecId] and address.
+/// Returns `None` if no precompile is defined.
+fn maybe_call_custom_precompile<CTX: ContextTr>(
+    spec: ZkSpecId,
+    context: &mut CTX,
+    inputs: &CallInputs,
+) -> Option<InterpreterResult> {
+    let precompile_address = inputs.bytecode_address;
+
+    let precompile_call = match spec {
+        ZkSpecId::AtlasV1 => match precompile_address {
+            CONTRACT_DEPLOYER_ADDRESS => {
+                v1::deployer::deployer_precompile_call as CustomPrecompile<_>
+            }
+            L1_MESSENGER_ADDRESS => {
+                v1::l1_messenger::l1_messenger_precompile_call as CustomPrecompile<_>
+            }
+            L2_BASE_TOKEN_ADDRESS => {
+                v1::l2_base_token::l2_base_token_precompile_call as CustomPrecompile<_>
+            }
+            _ => return None,
+        },
+        ZkSpecId::AtlasV2 => match precompile_address {
+            CONTRACT_DEPLOYER_ADDRESS => {
+                v2::deployer::deployer_precompile_call as CustomPrecompile<_>
+            }
+            L1_MESSENGER_ADDRESS => {
+                v2::l1_messenger::l1_messenger_precompile_call as CustomPrecompile<_>
+            }
+            L2_BASE_TOKEN_ADDRESS => {
+                v2::l2_base_token::l2_base_token_precompile_call as CustomPrecompile<_>
+            }
+            _ => return None,
+        },
+    };
+
+    let is_delegate = inputs.bytecode_address != inputs.target_address;
+    Some(precompile_call(context, inputs, is_delegate))
+}
+
 /// ZKsync OS precompile provider
 #[derive(Debug, Clone)]
-pub struct ZKsyncPrecompiles<CTX: ContextTr> {
+pub struct ZKsyncPrecompiles {
     /// Inner precompile provider is same as Ethereums.
     inner: EthPrecompiles,
-    // Custom precompiles specific to ZKsync OS.
-    custom_precompiles: HashMap<Address, CustomPrecompile<CTX>>,
     /// Spec id of the precompile provider.
     spec: ZkSpecId,
 }
 
-impl<CTX: ContextTr> ZKsyncPrecompiles<CTX> {
+impl ZKsyncPrecompiles {
     /// Create a new precompile provider with the given ZkSpec.
     #[inline]
     pub fn new_with_spec(spec: ZkSpecId) -> Self {
@@ -65,46 +103,11 @@ impl<CTX: ContextTr> ZKsyncPrecompiles<CTX> {
             }
         };
 
-        let custom_precompiles = match spec {
-            ZkSpecId::AtlasV1 => [
-                (
-                    CONTRACT_DEPLOYER_ADDRESS,
-                    v1::deployer::deployer_precompile_call::<CTX> as CustomPrecompile<CTX>,
-                ),
-                (
-                    L1_MESSENGER_ADDRESS,
-                    v1::l1_messenger::l1_messenger_precompile_call::<CTX> as CustomPrecompile<CTX>,
-                ),
-                (
-                    L2_BASE_TOKEN_ADDRESS,
-                    v1::l2_base_token::l2_base_token_precompile_call::<CTX>
-                        as CustomPrecompile<CTX>,
-                ),
-            ]
-            .into(),
-            ZkSpecId::AtlasV2 => [
-                (
-                    CONTRACT_DEPLOYER_ADDRESS,
-                    v2::deployer::deployer_precompile_call::<CTX> as CustomPrecompile<CTX>,
-                ),
-                (
-                    L1_MESSENGER_ADDRESS,
-                    v2::l1_messenger::l1_messenger_precompile_call::<CTX> as CustomPrecompile<CTX>,
-                ),
-                (
-                    L2_BASE_TOKEN_ADDRESS,
-                    v2::l2_base_token::l2_base_token_precompile_call::<CTX>
-                        as CustomPrecompile<CTX>,
-                ),
-            ]
-            .into(),
-        };
         Self {
             inner: EthPrecompiles {
                 precompiles,
                 spec: spec.into_eth_spec(),
             },
-            custom_precompiles,
             spec,
         }
     }
@@ -116,7 +119,7 @@ impl<CTX: ContextTr> ZKsyncPrecompiles<CTX> {
     }
 }
 
-impl<CTX> PrecompileProvider<CTX> for ZKsyncPrecompiles<CTX>
+impl<CTX> PrecompileProvider<CTX> for ZKsyncPrecompiles
 where
     CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
 {
@@ -137,23 +140,23 @@ where
         context: &mut CTX,
         inputs: &CallInputs,
     ) -> Result<Option<Self::Output>, String> {
-        if let Some(precompile_call) = self.custom_precompiles.get(&inputs.bytecode_address) {
-            // If the code is loaded from different account it is a delegatecall
-            let is_delegate = inputs.bytecode_address != inputs.target_address;
-
-            return Ok(Some(precompile_call(context, inputs, is_delegate)));
-        }
-
-        self.inner.run(context, inputs)
+        maybe_call_custom_precompile(self.spec, context, inputs).map_or_else(
+            || self.inner.run(context, inputs),
+            |result| Ok(Some(result)),
+        )
     }
 
     #[inline]
     fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
+        // Warm Blake2 (0x09) and Point Evaluation (0x0a) addresses even though
+        // they are not active precompiles.
+        let extra = [u64_to_address(9), u64_to_address(10)].into_iter();
         // TODO: temporary workaround to not warm P256 precompile
         Box::new(
             self.inner
                 .warm_addresses()
-                .filter(|x| *x != u64_to_address(P256VERIFY_ADDRESS)),
+                .filter(|x| *x != u64_to_address(P256VERIFY_ADDRESS))
+                .chain(extra),
         )
     }
 
@@ -163,7 +166,7 @@ where
     }
 }
 
-impl<CTX: ContextTr> Default for ZKsyncPrecompiles<CTX> {
+impl Default for ZKsyncPrecompiles {
     fn default() -> Self {
         Self::new_with_spec(ZkSpecId::AtlasV2)
     }
