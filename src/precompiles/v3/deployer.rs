@@ -19,11 +19,15 @@ pub const L2_GENESIS_UPGRADE_ADDRESS: Address =
 pub const MAX_CODE_SIZE: usize = 0x6000;
 
 /// Run the deployer precompile.
-pub fn deployer_precompile_call<CTX: ContextTr>(
+pub fn deployer_precompile_call<CTX>(
     ctx: &mut CTX,
     inputs: &CallInputs,
     is_delegate: bool,
-) -> InterpreterResult {
+) -> InterpreterResult
+where
+    CTX: ContextTr,
+    CTX::Journal: crate::force_deploy::ForceDeployRecorder,
+{
     let view = CalldataView::new(ctx, &inputs.input);
     let mut calldata = view.as_slice();
     let caller = inputs.caller;
@@ -57,7 +61,7 @@ pub fn deployer_precompile_call<CTX: ContextTr>(
 
             calldata = &calldata[4..];
 
-            let (address, bytecode_hash, bytecode_length) =
+            let (address, observable_bytecode_hash, bytecode_length) =
                 match set_bytecode_on_address_parse_calldata(calldata, gas) {
                     Ok(x) => x,
                     Err(early_return) => return early_return,
@@ -66,7 +70,13 @@ pub fn deployer_precompile_call<CTX: ContextTr>(
             // finished reading calldata, release borrow before mutating context
             drop(view);
 
-            set_bytecode_on_address_internal(ctx, address, bytecode_hash, bytecode_length, gas)
+            set_bytecode_on_address_internal(
+                ctx,
+                address,
+                observable_bytecode_hash,
+                bytecode_length,
+                gas,
+            )
         }
         _ => revert(gas),
     }

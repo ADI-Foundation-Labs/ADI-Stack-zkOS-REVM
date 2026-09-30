@@ -1,3 +1,4 @@
+use crate::force_deploy::ForceDeployRecorder;
 use crate::precompiles::calldata_view::CalldataView;
 use crate::precompiles::utils::{oog_error, revert};
 use revm::interpreter::CallInputs;
@@ -28,6 +29,7 @@ pub fn deployer_precompile_call<CTX>(
 ) -> InterpreterResult
 where
     CTX: ContextTr,
+    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore + crate::force_deploy::ForceDeployRecorder,
 {
     let view = CalldataView::new(ctx, &inputs.input);
     let mut calldata = view.as_slice();
@@ -61,7 +63,7 @@ where
                 return revert(gas);
             }
 
-            // decoding according to setDeployedCodeEVM(address,bytes)
+            // decoding according to setBytecodeDetailsEVM(address,bytes32,uint32,bytes32)
             calldata = &calldata[4..];
             if calldata.len() < 128 {
                 return revert(gas);
@@ -73,9 +75,6 @@ where
             }
             let address = Address::from_slice(&calldata[12..32]);
 
-            let bytecode_hash =
-                B256::from_slice(calldata[32..64].try_into().expect("Always valid"));
-
             let bytecode_length: u32 = match U256::from_be_slice(&calldata[64..96]).try_into() {
                 Ok(length) => length,
                 Err(_) => {
@@ -83,7 +82,12 @@ where
                 }
             };
 
-            let _observable_bytecode_hash =
+            // Code is looked up by the observable (keccak256) hash at [96..128].
+            // Every database backing this re-execution keys bytecodes by
+            // keccak256: the proving guest's database directly, and the
+            // consistency checker's state provider through its cache. The
+            // ZKsync OS versioned hash at [32..64] has no entry there.
+            let observable_bytecode_hash =
                 B256::from_slice(calldata[96..128].try_into().expect("Always valid"));
 
             // Although this can be called as a part of protocol upgrade,
@@ -96,18 +100,25 @@ where
             // finished reading calldata, release borrow before mutating context
             drop(view);
 
-            let bytecode = ctx.db_mut().code_by_hash(bytecode_hash).expect(
+            let bytecode = ctx.db_mut().code_by_hash(observable_bytecode_hash).expect(
                 "The bytecode is expected to be pre-loaded for any deployer precompile call",
             );
 
+            let bytecode_length = bytecode_length as usize;
+            if bytecode.original_bytes().len() < bytecode_length {
+                return revert(gas);
+            }
+
             let bytecode_padded = Bytecode::new_legacy(Bytes::copy_from_slice(
-                &bytecode.original_bytes()[0..bytecode_length as usize],
+                &bytecode.original_bytes()[0..bytecode_length],
             ));
             ctx.journal_mut().touch_account(address);
             ctx.journal_mut()
                 .load_account(address)
                 .expect("load_account");
             ctx.journal_mut().set_code(address, bytecode_padded);
+            ctx.journal_mut()
+                .record_force_deploy(address, observable_bytecode_hash);
             InterpreterResult::new(InstructionResult::Return, [].into(), gas)
         }
         _ => revert(gas),

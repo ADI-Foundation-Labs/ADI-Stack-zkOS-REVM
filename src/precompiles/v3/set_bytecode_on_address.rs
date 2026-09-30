@@ -1,3 +1,4 @@
+use crate::force_deploy::ForceDeployRecorder;
 use crate::precompiles::calldata_view::CalldataView;
 use crate::precompiles::utils::{oog_error, revert};
 use crate::precompiles::v3::common::{
@@ -21,7 +22,7 @@ pub const SET_BYTECODE_ON_ADDRESS_HOOK_ADDRESS: Address =
     address!("0000000000000000000000000000000000007002");
 
 /// Run the set-bytecode-on-address precompile.
-pub fn set_bytecode_on_address_precompile_call<CTX: ContextTr>(
+pub fn set_bytecode_on_address_precompile_call<CTX: ContextTr<Journal: ForceDeployRecorder>>(
     ctx: &mut CTX,
     inputs: &CallInputs,
     is_delegate: bool,
@@ -44,7 +45,7 @@ pub fn set_bytecode_on_address_precompile_call<CTX: ContextTr>(
         return early_return;
     }
 
-    let (address, bytecode_hash, bytecode_length) =
+    let (address, observable_bytecode_hash, bytecode_length) =
         match set_bytecode_on_address_parse_calldata(calldata, gas) {
             Ok(x) => x,
             Err(early_return) => return early_return,
@@ -53,7 +54,7 @@ pub fn set_bytecode_on_address_precompile_call<CTX: ContextTr>(
     // finished reading calldata, release borrow before mutating context
     drop(calldata_view);
 
-    set_bytecode_on_address_internal(ctx, address, bytecode_hash, bytecode_length, gas)
+    set_bytecode_on_address_internal(ctx, address, observable_bytecode_hash, bytecode_length, gas)
 }
 
 pub fn set_bytecode_on_address_parse_calldata(
@@ -71,14 +72,19 @@ pub fn set_bytecode_on_address_parse_calldata(
 
     let address = Address::from_slice(&calldata[12..32]);
 
-    let bytecode_hash = B256::from_slice(&calldata[32..64]);
-
     let bytecode_length: u32 = match U256::from_be_slice(&calldata[64..96]).try_into() {
         Ok(length) => length,
         Err(_) => {
             return Err(revert(gas));
         }
     };
+
+    // setBytecodeDetailsEVM(address, bytes32 bytecodeHash, uint32 len, bytes32
+    // observableBytecodeHash): code is looked up by the observable (keccak256)
+    // hash at [96..128] — every DB implementation provides bytecodes keyed by
+    // keccak256 (ProvenDB directly, the consistency checker's state provider
+    // via its cache). The versioned hash at [32..64] stays unused here.
+    let observable_bytecode_hash = B256::from_slice(&calldata[96..128]);
     // Although this can be called as a part of protocol upgrade,
     // we are checking the next invariants, just in case
     // EIP-158: reject code of length > 24576.
@@ -86,16 +92,20 @@ pub fn set_bytecode_on_address_parse_calldata(
         return Err(revert(gas));
     }
 
-    Ok((address, bytecode_hash, bytecode_length))
+    Ok((address, observable_bytecode_hash, bytecode_length))
 }
 
-pub fn set_bytecode_on_address_internal<CTX: ContextTr>(
+pub fn set_bytecode_on_address_internal<CTX>(
     ctx: &mut CTX,
     address: Address,
-    bytecode_hash: B256,
+    observable_bytecode_hash: B256,
     bytecode_length: u32,
     mut gas: Gas,
-) -> InterpreterResult {
+) -> InterpreterResult
+where
+    CTX: ContextTr,
+    CTX::Journal: crate::force_deploy::ForceDeployRecorder,
+{
     // Charge extra gas for `set_bytecode_details`
     let extra_gas = set_bytecode_details_extra_gas(bytecode_length as u64);
     if !gas.record_regular_cost(extra_gas) {
@@ -104,7 +114,7 @@ pub fn set_bytecode_on_address_internal<CTX: ContextTr>(
 
     let bytecode = ctx
         .db_mut()
-        .code_by_hash(bytecode_hash)
+        .code_by_hash(observable_bytecode_hash)
         .expect("The bytecode is expected to be pre-loaded for any deployer precompile call");
     let bytecode_length = bytecode_length as usize;
     if bytecode.original_bytes().len() < bytecode_length {
@@ -133,5 +143,7 @@ pub fn set_bytecode_on_address_internal<CTX: ContextTr>(
         .load_account(address)
         .expect("load_account");
     ctx.journal_mut().set_code(address, bytecode_padded);
+    ctx.journal_mut()
+        .record_force_deploy(address, observable_bytecode_hash);
     InterpreterResult::new(InstructionResult::Stop, [].into(), gas)
 }
